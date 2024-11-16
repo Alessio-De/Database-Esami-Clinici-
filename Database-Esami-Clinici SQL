@@ -1,0 +1,152 @@
+-- Creazione delle tabelle principali
+
+-- Tabella Pazienti
+CREATE TABLE Pazienti (
+    PazienteID INT PRIMARY KEY IDENTITY(1,1),
+    CodiceFiscale VARCHAR(16) UNIQUE NOT NULL,
+    Nome VARCHAR(50) NOT NULL,
+    Cognome VARCHAR(50) NOT NULL,
+    DataNascita DATE NOT NULL,
+    Email VARCHAR(100) NOT NULL,
+    Telefono VARCHAR(20),
+    Indirizzo VARCHAR(200),
+    DataRegistrazione DATETIME DEFAULT GETDATE()
+);
+
+-- Tabella TipiEsame
+CREATE TABLE TipiEsame (
+    TipoEsameID INT PRIMARY KEY IDENTITY(1,1),
+    NomeEsame VARCHAR(100) NOT NULL,
+    Descrizione TEXT,
+    TempoRisultati INT, -- Tempo stimato in giorni
+    Costo DECIMAL(10,2),
+    RepartoRiferimento VARCHAR(50)
+);
+
+-- Tabella Prenotazioni
+CREATE TABLE Prenotazioni (
+    PrenotazioneID INT PRIMARY KEY IDENTITY(1,1),
+    PazienteID INT FOREIGN KEY REFERENCES Pazienti(PazienteID),
+    TipoEsameID INT FOREIGN KEY REFERENCES TipiEsame(TipoEsameID),
+    DataPrenotazione DATETIME DEFAULT GETDATE(),
+    DataEsame DATETIME NOT NULL,
+    StatoPrenotazione VARCHAR(20) DEFAULT 'Prenotato',
+    Note TEXT
+);
+
+-- Tabella Risultati
+CREATE TABLE Risultati (
+    RisultatoID INT PRIMARY KEY IDENTITY(1,1),
+    PrenotazioneID INT FOREIGN KEY REFERENCES Prenotazioni(PrenotazioneID),
+    DataAnalisi DATETIME DEFAULT GETDATE(),
+    Esito TEXT NOT NULL,
+    RefertoPath VARCHAR(255), -- Percorso del file del referto
+    StatoInvioEmail VARCHAR(20) DEFAULT 'Non Inviato',
+    DataInvioEmail DATETIME,
+    MedicoRefertante VARCHAR(100)
+);
+
+-- Tabella Log Email
+CREATE TABLE LogEmail (
+    LogID INT PRIMARY KEY IDENTITY(1,1),
+    RisultatoID INT FOREIGN KEY REFERENCES Risultati(RisultatoID),
+    DataTentativoInvio DATETIME DEFAULT GETDATE(),
+    Stato VARCHAR(20),
+    MessaggioErrore TEXT
+);
+
+-- Procedura stored per l'inserimento di un nuovo paziente
+CREATE PROCEDURE InserisciPaziente
+    @CodiceFiscale VARCHAR(16),
+    @Nome VARCHAR(50),
+    @Cognome VARCHAR(50),
+    @DataNascita DATE,
+    @Email VARCHAR(100),
+    @Telefono VARCHAR(20),
+    @Indirizzo VARCHAR(200)
+AS
+BEGIN
+    INSERT INTO Pazienti (CodiceFiscale, Nome, Cognome, DataNascita, Email, Telefono, Indirizzo)
+    VALUES (@CodiceFiscale, @Nome, @Cognome, @DataNascita, @Email, @Telefono, @Indirizzo)
+END;
+
+-- Procedura stored per la prenotazione di un esame
+CREATE PROCEDURE PrenotaEsame
+    @PazienteID INT,
+    @TipoEsameID INT,
+    @DataEsame DATETIME
+AS
+BEGIN
+    INSERT INTO Prenotazioni (PazienteID, TipoEsameID, DataEsame)
+    VALUES (@PazienteID, @TipoEsameID, @DataEsame)
+END;
+
+-- Procedura stored per l'inserimento dei risultati e invio email
+CREATE PROCEDURE InserisciRisultatoEInviaEmail
+    @PrenotazioneID INT,
+    @Esito TEXT,
+    @RefertoPath VARCHAR(255),
+    @MedicoRefertante VARCHAR(100)
+AS
+BEGIN
+    DECLARE @EmailPaziente VARCHAR(100)
+    DECLARE @NomePaziente VARCHAR(100)
+    DECLARE @NomeEsame VARCHAR(100)
+    
+    -- Inserisce il risultato
+    INSERT INTO Risultati (PrenotazioneID, Esito, RefertoPath, MedicoRefertante)
+    VALUES (@PrenotazioneID, @Esito, @RefertoPath, @MedicoRefertante)
+    
+    -- Recupera le informazioni necessarie per l'email
+    SELECT 
+        @EmailPaziente = P.Email,
+        @NomePaziente = P.Nome + ' ' + P.Cognome,
+        @NomeEsame = T.NomeEsame
+    FROM Prenotazioni PR
+    JOIN Pazienti P ON PR.PazienteID = P.PazienteID
+    JOIN TipiEsame T ON PR.TipoEsameID = T.TipoEsameID
+    WHERE PR.PrenotazioneID = @PrenotazioneID;
+    
+    -- Qui andrebbe inserito il codice per l'invio effettivo dell'email
+    -- Esempio di utilizzo di sp_send_dbmail (SQL Server)
+    /*
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'SQL_Email_Profile',
+        @recipients = @EmailPaziente,
+        @subject = 'Risultati Esame: ' + @NomeEsame,
+        @body = 'Gentile ' + @NomePaziente + ',<br><br>' +
+                'I risultati del suo esame sono pronti...',
+        @body_format = 'HTML',
+        @file_attachments = @RefertoPath;
+    */
+    
+    -- Aggiorna lo stato dell'invio
+    UPDATE Risultati
+    SET StatoInvioEmail = 'Inviato',
+        DataInvioEmail = GETDATE()
+    WHERE PrenotazioneID = @PrenotazioneID;
+    
+    -- Registra il tentativo di invio nel log
+    INSERT INTO LogEmail (RisultatoID, Stato)
+    SELECT RisultatoID, 'Inviato'
+    FROM Risultati
+    WHERE PrenotazioneID = @PrenotazioneID;
+END;
+
+-- Vista per il monitoraggio degli esami da refertare
+CREATE VIEW EsamiDaRefertare AS
+SELECT 
+    P.Nome + ' ' + P.Cognome AS Paziente,
+    T.NomeEsame,
+    PR.DataEsame,
+    DATEDIFF(day, PR.DataEsame, GETDATE()) AS GiorniTrascorsi
+FROM Prenotazioni PR
+JOIN Pazienti P ON PR.PazienteID = P.PazienteID
+JOIN TipiEsame T ON PR.TipoEsameID = T.TipoEsameID
+LEFT JOIN Risultati R ON PR.PrenotazioneID = R.PrenotazioneID
+WHERE R.RisultatoID IS NULL;
+
+-- Indici per ottimizzare le query più frequenti
+CREATE INDEX IX_Prenotazioni_DataEsame ON Prenotazioni(DataEsame);
+CREATE INDEX IX_Risultati_DataAnalisi ON Risultati(DataAnalisi);
+CREATE INDEX IX_Pazienti_CodiceFiscale ON Pazienti(CodiceFiscale);
